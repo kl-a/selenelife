@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useDayStore } from '../store/dayStore';
 import { useSettingsStore } from '../store/settingsStore';
+import { useCycleStore } from '../store/cycleStore';
+import { getCyclePhase } from '../utils/cyclePredictor';
 
 type RoutineType = 'morning' | 'lunch' | 'bedtime';
 
@@ -351,7 +353,7 @@ export function DailyChecklist({ isLuteal = false }: { isLuteal?: boolean }) {
     dayRecord,
     setMedicationMorningTaken, setMedicationMorningTime,
     setMedicationArvoTaken, setMedicationArvoTime,
-    setSsriTaken, setSsriTime,
+    setSsriTaken,
     updateMeal, setMealTime,
     setLunchBreakTaken,
     setGymToday, setGymTime,
@@ -360,10 +362,22 @@ export function DailyChecklist({ isLuteal = false }: { isLuteal?: boolean }) {
   const {
     morningRoutineTime, lunchNudgeTime, bedtimeRoutineTime,
     setMorningRoutineTime, setLunchNudgeTime, setBedtimeRoutineTime,
+    expectedCycleLength, expectedPeriodLength,
   } = useSettingsStore();
+  const { cycles } = useCycleStore();
 
   const weekday = isWeekday();
   const mealsLogged = dayRecord.meals.filter((m) => m.logged).length;
+
+  const { isSSRIWindow, daysUntilPeriod } = useMemo(() => {
+    if (!cycles.length) return { isSSRIWindow: false, daysUntilPeriod: 0 };
+    const phase = getCyclePhase(cycles[0].cycleStartDate, expectedCycleLength, expectedPeriodLength, new Date());
+    const days = expectedCycleLength - phase.cyclePos;
+    return {
+      isSSRIWindow: phase.phase === 'menstrual' || (days >= 0 && days <= 14),
+      daysUntilPeriod: days,
+    };
+  }, [cycles, expectedCycleLength, expectedPeriodLength]);
 
   function toggleRoutine(type: RoutineType) {
     setOpenRoutine((prev) => (prev === type ? null : type));
@@ -425,7 +439,6 @@ export function DailyChecklist({ isLuteal = false }: { isLuteal?: boolean }) {
             {!weekday && <span className="font-bold text-[9px] text-muted-purple/50 uppercase tracking-widest ml-1">rest day</span>}
           </div>
           <div className="flex gap-2">
-            {/* Morning */}
             <MedDoseRow
               label="Morning"
               checked={dayRecord.medicationMorningTaken}
@@ -434,7 +447,6 @@ export function DailyChecklist({ isLuteal = false }: { isLuteal?: boolean }) {
               onToggle={() => setMedicationMorningTaken(!dayRecord.medicationMorningTaken)}
               onTimeChange={setMedicationMorningTime}
             />
-            {/* Arvo */}
             <MedDoseRow
               label="Arvo"
               checked={dayRecord.medicationArvoTaken}
@@ -443,17 +455,54 @@ export function DailyChecklist({ isLuteal = false }: { isLuteal?: boolean }) {
               onToggle={() => setMedicationArvoTaken(!dayRecord.medicationArvoTaken)}
               onTimeChange={setMedicationArvoTime}
             />
-            {/* SSRI — not weekday-gated; taken during luteal or any time */}
-            <MedDoseRow
-              label="SSRI"
-              checked={dayRecord.ssriTaken ?? false}
-              timeIso={dayRecord.ssriTime ?? null}
-              disabled={false}
-              onToggle={() => setSsriTaken(!(dayRecord.ssriTaken ?? false))}
-              onTimeChange={setSsriTime}
-            />
           </div>
         </div>
+
+        {/* SSRI — only visible during the 14-day luteal window and during the period */}
+        {isSSRIWindow && (
+          <div className="py-1">
+            <div
+              className="flex flex-col gap-1.5 px-3 py-2 rounded"
+              style={{
+                background: 'rgba(247,202,201,0.12)',
+                border: '2px solid #c98a88',
+                boxShadow: '3px 3px 0px #c98a88',
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm leading-none">🌙</span>
+                <span style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 10, color: '#fdfcff' }}>
+                  SSRI
+                </span>
+                <div className="flex-1" />
+                <button
+                  onClick={() => setSsriTaken(!(dayRecord.ssriTaken ?? false))}
+                  className="flex items-center gap-1.5"
+                >
+                  <span
+                    className="w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-all"
+                    style={{
+                      borderColor: dayRecord.ssriTaken ? '#c98a88' : 'rgba(201,138,136,0.5)',
+                      background: dayRecord.ssriTaken ? 'rgba(247,202,201,0.35)' : 'transparent',
+                    }}
+                  >
+                    {dayRecord.ssriTaken && (
+                      <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+                        <path d="M1 4l3 3 5-6" stroke="#fdfcff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    )}
+                  </span>
+                  <span className="font-body text-[11px]" style={{ color: dayRecord.ssriTaken ? '#fdfcff' : 'rgba(201,138,136,0.7)' }}>
+                    {dayRecord.ssriTaken ? 'logged' : 'log it'}
+                  </span>
+                </button>
+              </div>
+              <div className="font-body text-[11px]" style={{ color: 'rgba(155,137,196,0.7)', paddingLeft: 26 }}>
+                Luteal window · {daysUntilPeriod <= 0 ? 'Period in progress' : `${daysUntilPeriod} days to period`}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Meals */}
         {dayRecord.meals.map((meal) => (

@@ -54,7 +54,8 @@
       "Bash(sed -i '' \"s/'lifehex_settings'/'selene_settings'/g\" /Users/kellytsang/git-repo/wheel_of_life/src/store/settingsStore.ts)",
       "Bash(sed -i '' \"s/'lifehex_day'/'selene_day'/g\" /Users/kellytsang/git-repo/wheel_of_life/src/store/dayStore.ts)",
       "Bash(gh run *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(echo \"exit: $?\")"
     ],
     "additionalDirectories": [
       "/private/tmp"

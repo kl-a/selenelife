@@ -4,41 +4,15 @@ import { useDayStore } from '../store/dayStore';
 import { useDayHistoryStore } from '../store/dayHistoryStore';
 import { useCycleStore } from '../store/cycleStore';
 import { useSettingsStore } from '../store/settingsStore';
+import {
+  getValidToken as tmGetValidToken,
+  openOAuthPopup,
+  exchangeCodeForTokens,
+} from './tokenManager';
 import type { Session, DayRecord, CycleEntry, MealLog } from '../types';
-
-// ─── GIS types ────────────────────────────────────────────────────────────────
-
-interface GisTokenResponse {
-  access_token: string;
-  expires_in: number;
-  error?: string;
-}
-
-interface GisTokenClient {
-  requestAccessToken(options?: { prompt?: string }): void;
-}
-
-declare global {
-  interface Window {
-    google?: {
-      accounts: {
-        oauth2: {
-          initTokenClient(config: {
-            client_id: string;
-            scope: string;
-            callback: (r: GisTokenResponse) => void;
-            error_callback?: (e: { type: string }) => void;
-          }): GisTokenClient;
-        };
-      };
-    };
-  }
-}
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
-const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string;
-const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const FILE_NAME = 'selene-data.json';
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 const UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
@@ -66,60 +40,14 @@ interface SyncPayload {
   settings: SyncSettings;
 }
 
-// ─── GIS token client singleton ───────────────────────────────────────────────
-
-let tokenClient: GisTokenClient | null = null;
-let pendingResolve: ((token: string) => void) | null = null;
-let pendingReject: ((e: Error) => void) | null = null;
-
-function initTokenClient(): GisTokenClient {
-  if (tokenClient) return tokenClient;
-  if (!window.google?.accounts?.oauth2) throw new Error('GIS not ready');
-
-  tokenClient = window.google.accounts.oauth2.initTokenClient({
-    client_id: CLIENT_ID,
-    scope: SCOPE,
-    callback: (resp) => {
-      if (resp.error) {
-        pendingReject?.(new Error(resp.error));
-      } else {
-        useDriveStore.getState().setToken(resp.access_token, resp.expires_in);
-        pendingResolve?.(resp.access_token);
-      }
-      pendingResolve = null;
-      pendingReject = null;
-    },
-    error_callback: (err) => {
-      pendingReject?.(new Error(err.type));
-      pendingResolve = null;
-      pendingReject = null;
-    },
-  });
-  return tokenClient;
-}
-
-async function waitForGIS(timeoutMs = 8000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!window.google?.accounts?.oauth2) {
-    if (Date.now() > deadline) throw new Error('Google Identity Services failed to load');
-    await new Promise((r) => setTimeout(r, 100));
-  }
-}
-
-async function requestToken(prompt: '' | 'consent' = ''): Promise<string> {
-  await waitForGIS();
-  return new Promise<string>((resolve, reject) => {
-    pendingResolve = resolve;
-    pendingReject = reject;
-    initTokenClient().requestAccessToken({ prompt });
-  });
-}
+// ─── token helper ─────────────────────────────────────────────────────────────
 
 async function getValidToken(): Promise<string> {
-  const { accessToken, tokenExpiry } = useDriveStore.getState();
-  if (accessToken && tokenExpiry && Date.now() < tokenExpiry) return accessToken;
-  // Token missing or expired — silent refresh (no consent prompt if previously granted)
-  return requestToken('');
+  const token = await tmGetValidToken();
+  if (token) return token;
+  // Silent refresh failed — surface reconnect banner and abort sync
+  useDriveStore.getState().setNeedsReconnect(true);
+  throw new Error('Drive session expired — please reconnect');
 }
 
 // ─── Drive API fetch helpers ──────────────────────────────────────────────────
@@ -134,9 +62,14 @@ async function driveRequest(base: string, path: string, options: RequestInit = {
   let res = await fetch(base + path, { ...options, headers });
 
   if (res.status === 401) {
-    // Force fresh token and retry once
+    // Token rejected — clear and try a single silent refresh, then retry
     useDriveStore.getState().clearToken();
-    const fresh = await requestToken('');
+    const fresh = await tmGetValidToken();
+    if (!fresh) {
+      useDriveStore.getState().setNeedsReconnect(true);
+      throw new Error('Drive session expired — please reconnect');
+    }
+    useDriveStore.getState().setToken(fresh, 3600);
     res = await fetch(base + path, {
       ...options,
       headers: { ...headers, Authorization: `Bearer ${fresh}` },
@@ -154,7 +87,6 @@ const driveUpload = (path: string, options?: RequestInit) =>
 
 // ─── file operations ──────────────────────────────────────────────────────────
 
-// Searches by name; also cleans up duplicates if multiple files exist
 async function findExistingFileId(): Promise<string | null> {
   const res = await driveApi(
     `/files?spaces=appDataFolder&q=name%3D"${FILE_NAME}"&fields=files(id,modifiedTime)&orderBy=modifiedTime+desc&pageSize=10`
@@ -167,7 +99,6 @@ async function findExistingFileId(): Promise<string | null> {
   const id = files[0].id;
   useDriveStore.getState().setFileId(id);
 
-  // Delete any stale duplicates (same name, older modification time)
   for (const f of files.slice(1)) {
     driveApi(`/files/${f.id}`, { method: 'DELETE' }).catch(() => {});
   }
@@ -259,7 +190,6 @@ function buildPayload(): SyncPayload {
   };
 }
 
-// Merge: Drive items load first, local wins if newer or not on Drive (additive both ways)
 function mergeById<T extends { id: string; updated_at?: string; created_at?: string }>(
   local: T[], remote: T[]
 ): T[] {
@@ -288,14 +218,11 @@ function mergeByDate<T extends { date: string; updated_at?: string; created_at?:
   return Array.from(map.values()).sort((a, b) => b.date.localeCompare(a.date));
 }
 
-// Per-field merge for DayRecord — each field group wins based on its own timestamp.
-// Missing timestamps default to '' so any real interaction beats a blank default record.
 function mergeDayRecords(local: DayRecord, remote: DayRecord): DayRecord {
   const lf = local.fieldUpdatedAt ?? {};
   const rf = remote.fieldUpdatedAt ?? {};
   const win = (key: string) => (rf[key] ?? '') > (lf[key] ?? '');
 
-  // Merge per-field timestamps: keep the newer of the two
   const mergedFts: Record<string, string> = {};
   for (const k of new Set([...Object.keys(lf), ...Object.keys(rf)])) {
     mergedFts[k] = (rf[k] ?? '') > (lf[k] ?? '') ? rf[k] : lf[k];
@@ -357,7 +284,6 @@ function applyPayload(remote: SyncPayload): void {
   const { cycles } = useCycleStore.getState();
   const localSettings = useSettingsStore.getState();
 
-  // Merge tombstones: union of both sides, keep latest deletedAt per id
   const remoteTombstones = remote.deletedSessionIds ?? [];
   const tombstoneMap = new Map<string, string>();
   for (const t of [...(localDeleted ?? []), ...remoteTombstones]) {
@@ -366,7 +292,6 @@ function applyPayload(remote: SyncPayload): void {
   }
   const mergedTombstones = Array.from(tombstoneMap.entries()).map(([id, deletedAt]) => ({ id, deletedAt }));
 
-  // Merge sessions then strip any tombstoned IDs
   const mergedSessions = mergeById(sessions, remote.sessions ?? [])
     .filter((s) => !tombstoneMap.has(s.id));
 
@@ -386,7 +311,6 @@ function applyPayload(remote: SyncPayload): void {
     ),
   });
 
-  // Settings: last-write-wins using updated_at
   if (remote.settings) {
     const localTs = localSettings.updated_at ?? '';
     const remoteTs = remote.settings.updated_at ?? '';
@@ -397,8 +321,19 @@ function applyPayload(remote: SyncPayload): void {
 // ─── public API ───────────────────────────────────────────────────────────────
 
 export async function connectAndSync(): Promise<void> {
-  await requestToken('consent');
+  const code = await openOAuthPopup();
+  const tokens = await exchangeCodeForTokens(code);
+
+  localStorage.setItem('lifehex_access_token', tokens.access_token);
+  localStorage.setItem('lifehex_token_expiry', String(Date.now() + tokens.expires_in * 1000));
+  if (tokens.refresh_token) {
+    localStorage.setItem('lifehex_refresh_token', tokens.refresh_token);
+  }
+
+  useDriveStore.getState().setToken(tokens.access_token, tokens.expires_in);
   useDriveStore.getState().setConnected(true);
+  useDriveStore.getState().setNeedsReconnect(false);
+
   await syncFromDrive();
   await syncToDrive();
 }
@@ -416,7 +351,6 @@ export async function syncToDrive(): Promise<void> {
       try {
         await updateDriveFile(fileId, payload);
       } catch {
-        // File might have been deleted; try to find or create
         fileId = null;
         useDriveStore.getState().setFileId(null);
       }
@@ -447,12 +381,9 @@ export async function syncFromDrive(): Promise<void> {
 
   store.setSyncStatus('syncing');
   try {
-    // Always search by name — ensures we use the current canonical file even if
-    // the cached fileId is stale (e.g. after app rename from lifehex → selene)
     const fileId = await findExistingFileId();
 
     if (!fileId) {
-      // No remote data yet — first use from this device
       useDriveStore.getState().setSyncStatus('idle');
       return;
     }
@@ -461,7 +392,6 @@ export async function syncFromDrive(): Promise<void> {
     try {
       content = await readFileContent(fileId);
     } catch {
-      // File ID became invalid between search and read — bail gracefully
       useDriveStore.getState().setFileId(null);
       useDriveStore.getState().setSyncStatus('idle');
       return;
@@ -485,9 +415,11 @@ export async function disconnectDrive(): Promise<void> {
     try {
       await fetch(`https://oauth2.googleapis.com/revoke?token=${accessToken}`, { method: 'POST' });
     } catch {
-      // Ignore — token may already be expired
+      // Token may already be expired
     }
   }
-  tokenClient = null; // Reset singleton so next connect re-initialises
+  localStorage.removeItem('lifehex_access_token');
+  localStorage.removeItem('lifehex_refresh_token');
+  localStorage.removeItem('lifehex_token_expiry');
   useDriveStore.getState().disconnect();
 }

@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import type { DayRecord, MealLog } from '../types';
 import { v4 as uuid } from 'uuid';
 import { useDayHistoryStore } from './dayHistoryStore';
+import { resolveChecklistTime } from '../utils/checklistTime';
 
 function todayDate(): string {
   const d = new Date();
@@ -125,7 +126,7 @@ export const useDayStore = create<DayStore>()(
           dayRecord: {
             ...s.dayRecord,
             medicationMorningTaken: taken,
-            medicationMorningTime: taken ? new Date().toISOString() : null,
+            medicationMorningTime: taken ? resolveChecklistTime('morningMeds') : null,
             medicationTaken: taken || s.dayRecord.medicationArvoTaken,
             updated_at: new Date().toISOString(),
             fieldUpdatedAt: stamp(s.dayRecord, 'medicationMorning'),
@@ -147,7 +148,7 @@ export const useDayStore = create<DayStore>()(
           dayRecord: {
             ...s.dayRecord,
             medicationArvoTaken: taken,
-            medicationArvoTime: taken ? new Date().toISOString() : null,
+            medicationArvoTime: taken ? resolveChecklistTime('arvoMeds') : null,
             medicationTaken: s.dayRecord.medicationMorningTaken || taken,
             updated_at: new Date().toISOString(),
             fieldUpdatedAt: stamp(s.dayRecord, 'medicationArvo'),
@@ -169,7 +170,7 @@ export const useDayStore = create<DayStore>()(
           dayRecord: {
             ...s.dayRecord,
             ssriTaken: taken,
-            ssriTime: taken ? new Date().toISOString() : null,
+            ssriTime: taken ? resolveChecklistTime('ssri') : null, // always null per spec
             updated_at: new Date().toISOString(),
             fieldUpdatedAt: stamp(s.dayRecord, 'ssri'),
           },
@@ -194,7 +195,7 @@ export const useDayStore = create<DayStore>()(
                 ? {
                     ...m,
                     ...patch,
-                    loggedTime: patch.logged && !m.logged ? new Date().toISOString() : m.loggedTime,
+                    loggedTime: patch.logged && !m.logged ? resolveChecklistTime(m.meal) : m.loggedTime,
                   }
                 : m
             ),

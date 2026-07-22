@@ -209,9 +209,21 @@ type ClockTarget =
 
 function ChecklistGrid() {
   const { dayRecord, setMedicationMorningTaken, setMedicationMorningTime, setMedicationArvoTaken, setMedicationArvoTime, setSsriTaken, setSsriTime, updateMeal, setMealTime, setGymToday, setGymTime, setAloneTimeToday, setAloneTimeStart } = useDayStore();
+  const { cycles } = useCycleStore();
+  const { expectedCycleLength, expectedPeriodLength } = useSettingsStore();
   const [clockTarget, setClockTarget] = useState<ClockTarget | null>(null);
   const [timeInput, setTimeInput] = useState('');
   const isWeekday = new Date().getDay() >= 1 && new Date().getDay() <= 5;
+
+  const { isSSRIWindow, daysUntilPeriod } = useMemo(() => {
+    if (!cycles.length) return { isSSRIWindow: false, daysUntilPeriod: 0 };
+    const phase = getCyclePhase(cycles[0].cycleStartDate, expectedCycleLength, expectedPeriodLength, new Date());
+    const days = expectedCycleLength - phase.cyclePos;
+    return {
+      isSSRIWindow: phase.phase === 'menstrual' || (days >= 0 && days <= 14),
+      daysUntilPeriod: days,
+    };
+  }, [cycles, expectedCycleLength, expectedPeriodLength]);
   const meal = (id: 'breakfast' | 'lunch' | 'dinner') => dayRecord.meals.find(m => m.meal === id)!;
 
   function openClock(target: ClockTarget, currentIso: string | null, e: React.MouseEvent) {
@@ -284,8 +296,30 @@ function ChecklistGrid() {
           onToggle={() => setMedicationMorningTaken(!dayRecord.medicationMorningTaken)} clockT={{ kind: 'medicationMorning' }} />
         <Cell emoji="💊" label="Arvo" checked={dayRecord.medicationArvoTaken} iso={dayRecord.medicationArvoTime}
           onToggle={() => setMedicationArvoTaken(!dayRecord.medicationArvoTaken)} clockT={{ kind: 'medicationArvo' }} />
-        <Cell emoji="💊" label="SSRI" checked={dayRecord.ssriTaken ?? false} iso={dayRecord.ssriTime ?? null}
-          onToggle={() => setSsriTaken(!(dayRecord.ssriTaken ?? false))} clockT={{ kind: 'medicationSsri' }} />
+        {isSSRIWindow && (
+          <div
+            style={{
+              gridColumn: 'span 2',
+              minHeight: 64, padding: '10px 12px', borderRadius: 4, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 10,
+              background: 'rgba(247,202,201,0.12)',
+              border: '2px solid #c98a88',
+              boxShadow: '3px 3px 0px #c98a88',
+            }}
+            onClick={() => setSsriTaken(!(dayRecord.ssriTaken ?? false))}
+          >
+            <span style={{ fontSize: 20, flexShrink: 0 }}>🌙</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: "'Press Start 2P', monospace", fontSize: 11, color: '#fdfcff' }}>SSRI</div>
+              <div style={{ fontFamily: 'Nunito, sans-serif', fontSize: 11, color: 'rgba(155,137,196,0.7)', marginTop: 2 }}>
+                Luteal window · {daysUntilPeriod <= 0 ? 'Period in progress' : `${daysUntilPeriod} days to period`}
+              </div>
+            </div>
+            <span style={{ color: dayRecord.ssriTaken ? '#f7cac9' : 'rgba(201,138,136,0.5)', fontSize: 13, fontWeight: 700 }}>
+              {dayRecord.ssriTaken ? '✓' : ''}
+            </span>
+          </div>
+        )}
 
         <Cell emoji="🍳" label="Breakfast" checked={meal('breakfast').logged} iso={meal('breakfast').loggedTime}
           onToggle={() => updateMeal('breakfast', { logged: !meal('breakfast').logged, loggedTime: !meal('breakfast').logged ? new Date().toISOString() : null })}
