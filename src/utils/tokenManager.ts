@@ -6,6 +6,10 @@ const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string;
 const CLIENT_SECRET = import.meta.env.VITE_GOOGLE_CLIENT_SECRET as string;
 const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 
+// Includes the /selenelife/ base path so GitHub Pages serves the app on redirect.
+// In dev this resolves to http://localhost:5173 (BASE_URL is '/').
+const REDIRECT_URI = window.location.origin + import.meta.env.BASE_URL.replace(/\/$/, '');
+
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const CHECK_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -69,7 +73,7 @@ export function openOAuthPopup(): Promise<string> {
   return new Promise((resolve, reject) => {
     const params = new URLSearchParams({
       client_id: CLIENT_ID,
-      redirect_uri: window.location.origin,
+      redirect_uri: REDIRECT_URI,
       response_type: 'code',
       scope: SCOPE,
       access_type: 'offline',
@@ -119,7 +123,7 @@ export async function exchangeCodeForTokens(code: string): Promise<{
       client_id: CLIENT_ID,
       client_secret: CLIENT_SECRET,
       code,
-      redirect_uri: window.location.origin,
+      redirect_uri: REDIRECT_URI,
       grant_type: 'authorization_code',
     }),
   });
