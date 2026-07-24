@@ -13,6 +13,25 @@ const REDIRECT_URI = window.location.origin + import.meta.env.BASE_URL.replace(/
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const CHECK_INTERVAL_MS = 10 * 60 * 1000;
 
+// ─── PKCE helpers ─────────────────────────────────────────────────────────────
+
+function base64urlEncode(buf: ArrayBuffer): string {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+}
+
+async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
+  const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
+  const verifier = base64urlEncode(verifierBytes.buffer);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  const challenge = base64urlEncode(digest);
+  return { verifier, challenge };
+}
+
+// ─── token refresh ────────────────────────────────────────────────────────────
+
 export async function refreshAccessToken(): Promise<string | null> {
   const refreshToken = localStorage.getItem('lifehex_refresh_token');
   if (!refreshToken) return null;
@@ -69,7 +88,13 @@ export function startTokenRefreshTimer(): void {
   }, CHECK_INTERVAL_MS);
 }
 
-export function openOAuthPopup(): Promise<string> {
+// ─── OAuth popup (authorization code flow + PKCE) ─────────────────────────────
+
+export async function openOAuthPopup(): Promise<string> {
+  const { verifier, challenge } = await generatePKCE();
+  // Store verifier so exchangeCodeForTokens can read it after popup closes
+  sessionStorage.setItem('lifehex_pkce_verifier', verifier);
+
   return new Promise((resolve, reject) => {
     const params = new URLSearchParams({
       client_id: CLIENT_ID,
@@ -78,6 +103,8 @@ export function openOAuthPopup(): Promise<string> {
       scope: SCOPE,
       access_type: 'offline',
       prompt: 'consent',
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
     });
 
     const popup = window.open(
@@ -116,6 +143,9 @@ export async function exchangeCodeForTokens(code: string): Promise<{
   refresh_token?: string;
   expires_in: number;
 }> {
+  const verifier = sessionStorage.getItem('lifehex_pkce_verifier') ?? '';
+  sessionStorage.removeItem('lifehex_pkce_verifier');
+
   const response = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -125,6 +155,7 @@ export async function exchangeCodeForTokens(code: string): Promise<{
       code,
       redirect_uri: REDIRECT_URI,
       grant_type: 'authorization_code',
+      code_verifier: verifier,
     }),
   });
 
